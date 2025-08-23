@@ -134,6 +134,9 @@ export default function App() {
     const [isGameOver, setIsGameOver] = useState(false);
     const [enPassantTarget, setEnPassantTarget] = useState(null);
     const [castlingRights, setCastlingRights] = useState({ w: { k: true, q: true }, b: { k: true, q: true } });
+    const [promotionSquare, setPromotionSquare] = useState(null);
+    const [capturedPieces, setCapturedPieces] = useState({ w: [], b: [] });
+    const [lastMove, setLastMove] = useState(null);
     const timerRef = useRef();
 
     // Firestore and Auth state
@@ -142,6 +145,9 @@ export default function App() {
     const [userId, setUserId] = useState(null);
     const [isAuthReady, setIsAuthReady] = useState(false);
     const [showJoinModal, setShowJoinModal] = useState(false);
+
+    // This holds the board state right after a move, before promotion is chosen
+    const pendingMove = useRef(null);
 
     // Initialize Firebase and authenticate user
     useEffect(() => {
@@ -183,6 +189,8 @@ export default function App() {
                 setTurn(data.turn);
                 setEnPassantTarget(data.enPassantTarget || null);
                 setCastlingRights(data.castlingRights || { w: { k: true, q: true }, b: { k: true, q: true } });
+                setCapturedPieces(data.capturedPieces || { w: [], b: [] });
+                setLastMove(data.lastMove || null);
 
                 // Set the timer based on the last move timestamp
                 const now = Date.now();
@@ -242,7 +250,7 @@ export default function App() {
     }, [turn, playerColor, isGameOver]);
 
     // Function to update the game state in Firestore
-    const updateGameState = async (newBoard, newTurn, newEnPassantTarget, newCastlingRights, gameOver = false, message = '') => {
+    const updateGameState = async (newBoard, newTurn, newEnPassantTarget, newCastlingRights, newCapturedPieces, newLastMove, gameOver = false, message = '') => {
         if (!roomId) return;
         const roomRef = doc(db, `/artifacts/${appId}/public/data/chess_games/${roomId}`);
         try {
@@ -252,6 +260,8 @@ export default function App() {
                 lastMoveTimestamp: Date.now(),
                 enPassantTarget: newEnPassantTarget,
                 castlingRights: newCastlingRights,
+                capturedPieces: newCapturedPieces,
+                lastMove: newLastMove,
                 isGameOver: gameOver,
                 statusMessage: message,
             });
@@ -303,8 +313,8 @@ export default function App() {
 
     // Function to handle a move on the board
     const handleMove = (move) => {
-        if (turn !== playerColor || isGameOver) {
-            setStatusMessage('انتظر دورك للتحرك.');
+        if (turn !== playerColor || isGameOver || promotionSquare) {
+            setStatusMessage('انتظر دورك أو قم بالترقية.');
             return;
         }
 
@@ -320,33 +330,83 @@ export default function App() {
 
         const newBoard = new Map(board);
         const pieceType = piece.toLowerCase();
-        let newEnPassantTarget = null;
-        const newCastlingRights = JSON.parse(JSON.stringify(castlingRights));
+
+        // Important: check for capture before moving the piece
+        const capturedPiece = newBoard.get(to);
 
         // Move piece
         newBoard.set(to, piece);
         newBoard.delete(from);
 
-        // Handle special moves
+        // Check for promotion
+        if (pieceType === 'p' && (to[1] === '8' || to[1] === '1')) {
+            setPromotionSquare(to);
+            // Store the intermediate state
+            pendingMove.current = {
+                board: newBoard,
+                from: from,
+                to: to,
+                capturedPiece: capturedPiece,
+            };
+            setBoard(newBoard); // Update UI to show pawn on final rank
+            setFromSquare(null);
+            setValidMoves([]);
+            return; // Stop here and wait for promotion choice
+        }
+
+        // If not a promotion, finalize the move
+        finalizeMove(newBoard, from, to, capturedPiece);
+    };
+
+    const handlePromotion = (promotionPiece) => {
+        if (!promotionSquare || !pendingMove.current) return;
+
+        const { board: tempBoard, from, to, capturedPiece } = pendingMove.current;
+        const pieceColor = getPieceColor(tempBoard.get(to));
+        const newPiece = pieceColor === 'w' ? promotionPiece.toUpperCase() : promotionPiece.toLowerCase();
+
+        const finalBoard = new Map(tempBoard);
+        finalBoard.set(promotionSquare, newPiece);
+
+        setBoard(finalBoard);
+        setPromotionSquare(null);
+        pendingMove.current = null;
+
+        finalizeMove(finalBoard, from, to, capturedPiece);
+    };
+
+    const finalizeMove = (finalBoard, from, to, capturedPiece) => {
+        const piece = finalBoard.get(to);
+        const pieceType = piece.toLowerCase();
+        let newEnPassantTarget = null;
+        const newCastlingRights = JSON.parse(JSON.stringify(castlingRights));
+        const newCapturedPieces = JSON.parse(JSON.stringify(capturedPieces));
+        const newLastMove = { from, to };
+
+        if (capturedPiece) {
+            const capturerColor = getPieceColor(piece);
+            newCapturedPieces[capturerColor].push(capturedPiece);
+        }
+
+        // Handle special move side effects
         if (pieceType === 'p') {
-            if (to === enPassantTarget) {
+             if (to === enPassantTarget) {
                 const capturedPawnRank = to[1] === '6' ? '5' : '4';
-                newBoard.delete(to[0] + capturedPawnRank);
+                const enPassantCapturedPawn = board.get(to[0] + capturedPawnRank);
+                newCapturedPieces[getPieceColor(piece)].push(enPassantCapturedPawn);
+                finalBoard.delete(to[0] + capturedPawnRank);
             }
             if (Math.abs(from[1] - to[1]) === 2) {
                 newEnPassantTarget = from[0] + (parseInt(from[1]) + (getPieceColor(piece) === 'w' ? 1 : -1));
-            }
-            if (to[1] === '8' || to[1] === '1') {
-                newBoard.set(to, getPieceColor(piece) === 'w' ? 'Q' : 'q');
             }
         } else if (pieceType === 'k') {
             if (Math.abs(files.indexOf(from[0]) - files.indexOf(to[0])) === 2) {
                 const rookFile = to[0] === 'g' ? 'h' : 'a';
                 const newRookFile = to[0] === 'g' ? 'f' : 'd';
                 const rank = from[1];
-                const rook = newBoard.get(rookFile + rank);
-                newBoard.delete(rookFile + rank);
-                newBoard.set(newRookFile + rank, rook);
+                const rook = finalBoard.get(rookFile + rank);
+                finalBoard.delete(rookFile + rank);
+                finalBoard.set(newRookFile + rank, rook);
             }
             newCastlingRights[getPieceColor(piece)].k = false;
             newCastlingRights[getPieceColor(piece)].q = false;
@@ -360,35 +420,47 @@ export default function App() {
         // Check for game over
         const newTurn = turn === 'w' ? 'b' : 'w';
         const opponentMoves = [];
-        for(const [sq, p] of newBoard.entries()){
-            if(getPieceColor(p) === newTurn){
-                opponentMoves.push(...getValidMoves(sq, newBoard, newCastlingRights, newEnPassantTarget));
+        for (const [sq, p] of finalBoard.entries()) {
+            if (getPieceColor(p) === newTurn) {
+                opponentMoves.push(...getValidMoves(sq, finalBoard, newCastlingRights, newEnPassantTarget));
             }
         }
 
         let newIsGameOver = false;
         let newStatusMessage = '';
-        if(opponentMoves.length === 0){
+        if (opponentMoves.length === 0) {
             newIsGameOver = true;
-            const opponentKingSquare = [...newBoard.entries()].find(([s, p]) => p.toLowerCase() === 'k' && getPieceColor(p) === newTurn)?.[0];
-            if(isSquareAttacked(opponentKingSquare, turn, newBoard)){
+            const opponentKingSquare = [...finalBoard.entries()].find(([s, p]) => p.toLowerCase() === 'k' && getPieceColor(p) === newTurn)?.[0];
+            if (isSquareAttacked(opponentKingSquare, turn, finalBoard)) {
                 newStatusMessage = `كش ملك! اللاعب ${turn === 'w' ? 'الأبيض' : 'الأسود'} هو الفائز.`;
             } else {
                 newStatusMessage = "جمود! انتهت اللعبة بالتعادل.";
             }
         }
 
-        updateGameState(newBoard, newTurn, newEnPassantTarget, newCastlingRights, newIsGameOver, newStatusMessage);
+        updateGameState(finalBoard, newTurn, newEnPassantTarget, newCastlingRights, newCapturedPieces, newLastMove, newIsGameOver, newStatusMessage);
         playMoveSound();
 
         setFromSquare(null);
         setValidMoves([]);
     };
 
+    const handleResign = () => {
+        if (isGameOver) return;
+        const winner = playerColor === 'w' ? 'الأسود' : 'الأبيض';
+        const loser = playerColor === 'w' ? 'الأبيض' : 'الأسود';
+        const message = `استسلم اللاعب ${loser}! اللاعب ${winner} هو الفائز.`;
+
+        // Use existing state values where no change is needed
+        updateGameState(board, turn, enPassantTarget, castlingRights, capturedPieces, lastMove, true, message);
+    };
+
     // Handle square click logic
     const handleSquareClick = (square) => {
         const piece = board.get(square);
         const pieceColor = piece ? getPieceColor(piece) : null;
+
+        if (promotionSquare) return; // Don't allow moves during promotion
 
         if (fromSquare) {
             handleMove({ from: fromSquare, to: square });
@@ -408,7 +480,7 @@ export default function App() {
     };
 
     // Component for a single chess square
-    const ChessSquare = ({ squareName }) => {
+    const ChessSquare = ({ squareName, isLastMove }) => {
         const piece = board.get(squareName);
         const files = playerColor === 'w' ? ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] : ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'];
         const ranks = playerColor === 'w' ? ['8', '7', '6', '5', '4', '3', '2', '1'] : ['1', '2', '3', '4', '5', '6', '7', '8'];
@@ -421,12 +493,13 @@ export default function App() {
         return (
             <div
                 onClick={() => handleSquareClick(squareName)}
-                className={`w-12 h-12 md:w-16 md:h-16 flex justify-center items-center text-2xl md:text-4xl
+                className={`w-12 h-12 md:w-16 md:h-16 flex justify-center items-center text-2xl md:text-4xl relative
                     ${isLight ? 'bg-gray-200 text-gray-800' : 'bg-gray-600 text-white'}
                     ${isSelected ? 'border-4 border-yellow-500' : ''}
                     ${isValidMove ? 'bg-blue-500 bg-opacity-70 cursor-pointer' : ''}
                     ${piece ? 'cursor-pointer' : ''}`}
             >
+                {isLastMove && <div className="absolute inset-0 bg-green-500 bg-opacity-50" />}
                 {pieceSymbols[piece] || ''}
             </div>
         );
@@ -441,7 +514,8 @@ export default function App() {
         for (const rank of ranks) {
             for (const file of files) {
                 const squareName = `${file}${rank}`;
-                squares.push(<ChessSquare key={squareName} squareName={squareName} />);
+                const isLastMove = lastMove && (squareName === lastMove.from || squareName === lastMove.to);
+                squares.push(<ChessSquare key={squareName} squareName={squareName} isLastMove={isLastMove} />);
             }
         }
         return (
@@ -449,6 +523,17 @@ export default function App() {
                 {squares}
             </div>
         );
+    };
+
+    const CapturedPieces = ({ pieces }) => {
+        if (!pieces || pieces.length === 0) return null;
+        return (
+            <div className="flex flex-wrap gap-1 h-8 items-center">
+                {pieces.map((p, i) => (
+                    <span key={i} className="text-xl text-gray-400">{pieceSymbols[p]}</span>
+                ))}
+            </div>
+        )
     };
 
     // Function to create a new game room
@@ -463,6 +548,8 @@ export default function App() {
             player1Id: userId,
             player2Id: null,
             createdAt: new Date(),
+            capturedPieces: { w: [], b: [] },
+            lastMove: null,
         });
         setPlayerColor('w');
         setRoomId(gameRef.id);
@@ -488,15 +575,6 @@ export default function App() {
         }
         setShowJoinModal(false);
     };
-
-    // Main UI rendering
-    if (!isAuthReady || loading) {
-        return (
-            <div className="flex items-center justify-center min-h-screen bg-gray-900 text-white">
-                <p>يتم التحميل... يرجى الانتظار.</p>
-            </div>
-        );
-    }
 
     // Modal for joining a game
     const JoinModal = () => (
@@ -527,8 +605,41 @@ export default function App() {
         </div>
     );
 
+    const PromotionModal = () => {
+        const pieces = ['q', 'r', 'b', 'n'];
+        const color = turn;
+        return (
+            <div className="fixed inset-0 bg-gray-950 bg-opacity-75 flex items-center justify-center p-4 z-50">
+                <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+                    <h2 className="text-xl font-bold mb-4 text-white">اختر قطعة للترقية</h2>
+                    <div className="flex justify-center gap-4">
+                        {pieces.map(p => (
+                            <div key={p} onClick={() => handlePromotion(p)} className="w-16 h-16 bg-gray-700 rounded-md flex justify-center items-center text-5xl cursor-pointer hover:bg-gray-600 transition-colors">
+                                {pieceSymbols[color === 'w' ? p.toUpperCase() : p]}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        )
+    };
+
+    // Main UI rendering
+    if (!isAuthReady || loading) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-900 text-white">
+                <p>يتم التحميل... يرجى الانتظار.</p>
+            </div>
+        );
+    }
+
+    const opponentColor = playerColor === 'w' ? 'b' : 'w';
+    const myCaptured = capturedPieces[opponentColor];
+    const opponentCaptured = capturedPieces[playerColor];
+
     return (
         <div className="bg-gray-900 min-h-screen text-white flex flex-col items-center justify-center p-4 relative">
+            {promotionSquare && <PromotionModal />}
             <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-gray-700 bg-opacity-75 rounded-full px-4 py-2 shadow-lg z-10">
                 <h2 className="text-sm sm:text-lg font-bold text-gray-300">مصمم هذه اللعبة: أبو بكر العالمي</h2>
             </div>
@@ -536,23 +647,36 @@ export default function App() {
             <h1 className="text-4xl font-bold mb-8 mt-16 sm:mt-8">لعبة الشطرنج</h1>
 
             {roomId ? (
-                <>
-                    <div className="text-center w-full max-w-lg mb-4">
+                <div className="w-full max-w-lg flex flex-col items-center">
+                    <CapturedPieces pieces={opponentCaptured} />
+                    <div className="text-center w-full max-w-lg my-2">
                         <p className={`text-3xl font-bold transition-all duration-300 ${turn === playerColor ? 'text-green-400' : 'text-red-400'}`}>
                             {timer}
                         </p>
                     </div>
                     <ChessBoard />
-                    <div className="mt-8 p-4 bg-gray-800 rounded-lg shadow-xl text-center w-full max-w-lg">
-                        <p className="text-lg font-medium">{statusMessage}</p>
-                        <p className="mt-2 text-sm text-gray-400">
-                           معرّف غرفتك: <span className="font-mono text-white select-all">{roomId}</span>
-                        </p>
-                        <p className="mt-1 text-sm text-gray-400">
-                           لونك: <span className="font-semibold">{playerColor === 'w' ? 'أبيض' : 'أسود'}</span>
-                        </p>
+                    <CapturedPieces pieces={myCaptured} />
+                    <div className="mt-4 p-4 bg-gray-800 rounded-lg shadow-xl text-center w-full max-w-lg">
+                        <div className="flex justify-between items-center">
+                            <div>
+                                <p className="text-lg font-medium">{statusMessage}</p>
+                                <p className="mt-2 text-sm text-gray-400">
+                                   معرّف غرفتك: <span className="font-mono text-white select-all">{roomId}</span>
+                                </p>
+                                <p className="mt-1 text-sm text-gray-400">
+                                   لونك: <span className="font-semibold">{playerColor === 'w' ? 'أبيض' : 'أسود'}</span>
+                                </p>
+                            </div>
+                            <button
+                                onClick={handleResign}
+                                disabled={isGameOver}
+                                className="py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 disabled:bg-red-800 disabled:cursor-not-allowed transition-colors"
+                            >
+                                استسلام
+                            </button>
+                        </div>
                     </div>
-                </>
+                </div>
             ) : (
                 <div className="text-center p-4 bg-gray-800 rounded-lg shadow-xl w-full max-w-sm">
                     <p className="text-lg font-medium mb-4">انضم أو أنشئ لعبة</p>
