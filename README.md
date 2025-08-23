@@ -84,20 +84,19 @@ To run the game on your local machine for development, use the following command
 npm run dev
 ```
 
-### Building for Production (البناء للإنتاج)
+### Deployment to GitHub Pages (النشر على GitHub Pages)
 
-To create a static build of the application for deployment, run:
+This project is configured for easy deployment to GitHub Pages.
 
-```bash.
-npm run build
+Simply run the following command in your terminal:
+
+```bash
+npm run deploy
 ```
-This will create a `dist` folder in your project directory. This folder contains all the files needed for deployment.
 
-### Deployment (النشر)
+This command will automatically:
+1.  Build the application for production.
+2.  Push the built files to a special `gh-pages` branch on your repository.
+3.  GitHub Pages will then serve the application from this branch.
 
-You can deploy this game to any static web hosting service.
-
-1.  Run the `npm run build` command as described above.
-2.  Deploy the contents of the generated `dist` folder to your hosting provider.
-    *   **Popular free options:** [Vercel](https://vercel.com/), [Netlify](https://www.netlify.com/), [GitHub Pages](https://pages.github.com/).
-    *   Most of these services can be connected directly to your Git repository to automatically build and deploy the application whenever you push new changes.
+After running the command, your updated game should be live at [https://abnjv.github.io/A](https://abnjv.github.io/A) within a few minutes.
